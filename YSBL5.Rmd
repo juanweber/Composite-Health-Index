@@ -1,0 +1,751 @@
+
+```{r}
+if (!require("dplyr")) {install.packages("dplyr")}
+if (!require("readr")) {install.packages("readr")}
+if (!require("ggplot2")) {install.packages("ggplot2")}
+if (!require("tidyr")) {install.packages("tidyr")}
+if (!require("reshape2")) {install.packages("reshape2")}
+if (!require("fingertipsR")) {install.packages("fingertipsR")}
+if (!require("sf")) {install.packages("sf")}
+if (!require("factoextra")) {install.packages("factoextra")} # for PCA
+
+```
+
+```{r}
+library(fingertipsR)
+library(tidyverse)
+library(fingertipscharts)
+library(corrplot)
+library(psych)
+library(reshape2)
+library(factoextra) # for PCA
+```
+
+```{r}
+#profiles <- profiles()
+#areas <- area_types()
+```
+
+```{r}
+indicators <- indicators(ProfileID = 19) #there are 168 indicators in profileID 19 (PHOF)
+```
+
+```{r}
+data <- fingertips_data(ProfileID = 19, AreaTypeID = 101)
+```
+
+```{r}
+# Latest data for each District & UA, Indicator & General population
+
+latest_data <- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "District & UA", Sex == "Persons") #%>%
+  #view()
+#view(latest_data)
+
+```
+
+```{r}
+# which indicators remain at this point?
+latest_data_ind <- latest_data %>%
+  group_by(IndicatorID) %>%
+  distinct(IndicatorID) #%>%
+  #view()
+```
+There are 84 indicators corresponding to the District & Local Authority area level, of which remain 72 indicators when filtering for the general population (i.e. Sex = Persons). This eliminates indicators which are designed for tracking the differences between the sexes, for example, "Life expectancy at birth" (Indicator ID 90366).
+```{r}
+# Identifying which indicators have the largest proportion of missing data 
+# Credits to John Lomas
+latest_data_missingprop <- latest_data %>% 
+  group_by(TimeperiodSortable, IndicatorID, IndicatorName) %>% 
+  summarise(n_missing = sum(is.na(Value)), 
+            prop_missing = sum(is.na(Value))/n(), 
+            n = n()) %>% 
+  arrange(desc(prop_missing)) %>% 
+  filter(prop_missing >= 0.15) #%>%
+  #view()
+  
+```
+The indicator with the largest proportion of missing values will be the less reliable at the time of calculating the index. The indicators "Deaths from drug misuse", "Treatment completion for TB", "HIV late diagnosis" have over 15% of missing data, but since their nature is of great importance to a healthcare landscape, these will be included in the analysis. Indicators "Statutory homelessness - Eligible homeless people not in priority need" and "Estimated diabetes diagnosis rate", the latter for the 2017 period only, since there is also one for the 2018 period, will be excluded.
+```{r}
+latest_data2 <- latest_data[ ! (( latest_data$TimeperiodSortable == 20170000 & latest_data$IndicatorID == 93347 ) 
+                              | ( latest_data$TimeperiodSortable == 20170000 & latest_data$IndicatorID == 92314)) , ]
+#view(latest_data2)
+```
+
+```{r}
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+data_w_median <- latest_data2 %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+#view(data_w_median)
+```
+
+```{r}
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ data_wide <- xtabs(Value_imputed ~ AreaName + IndicatorID, data_w_median) %>%
+   as.data.frame.matrix()
+ #view(data_wide)
+ 
+```
+
+```{r}
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which later are replaced by median values.
+
+not_normal_ind <- c()
+i <- 1
+
+for (col_name in colnames(data_wide)) {
+  
+  if (shapiro.test(as.numeric(data_wide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    not_normal_ind[i] <- col_name                                       #function
+    log10(data_wide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+```
+
+```{r}
+replace_w_median =function(x){
+   
+   x[is.na(x)] = median(x, na.rm=TRUE) # converts the value with NA to median value from the indicator
+   x                                   # taken from Stack Overflow
+   }
+```
+
+```{r}
+normal_data = data.frame(apply(data_wide, 2, replace_w_median))
+#view(normal_data)
+```
+
+```{r}
+# Reverse polarity of indicators where a higher number means a better index.
+
+normal_data$X93077 <- normal_data$X93077 * -1
+normal_data$X93078 <- normal_data$X93078 * -1
+normal_data$X93079 <- normal_data$X93079 * -1
+normal_data$X93014 <- normal_data$X93014 * -1
+normal_data$X91720 <- normal_data$X91720 * -1
+normal_data$X91367 <- normal_data$X91367 * -1
+normal_data$X92441 <- normal_data$X92441 * -1
+normal_data$X91195 <- normal_data$X91195 * -1
+normal_data$X92313 <- normal_data$X92313 * -1
+normal_data$X90834 <- normal_data$X90834 * -1
+
+```
+
+```{r}
+scaled_data <- data.frame(scale(normal_data))  # scales the data to z-scores of each indicator per area.
+#view(scaled_data)
+```
+
+```{r}
+# Calculation of Mean Z-score per Area
+data_zmean <- scaled_data
+
+data_zmean$MeanZ <- rowMeans(data_zmean)
+#View(data_zmean)
+```
+
+```{r}
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape considering every indicator
+#at this point
+
+area_meanz <- data_zmean %>%
+  select(MeanZ) 
+
+#view(area_meanz)
+```
+
+```{r}
+# Correlation between indicators
+# Credits to Nanjo Atsunori
+
+data_cor_assignment <- cor(scaled_data)
+corrplot(data_cor_assignment, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+
+```{r}
+# Principal Component Analysis
+
+prin_comp <- prcomp(data_cor_assignment, scale. = FALSE, center = FALSE) # data has already been scaled and centered with the scale() function
+names(prin_comp)
+```
+
+```{r}
+prin_comp$rotation
+```
+
+```{r}
+dim(prin_comp$x)
+```
+
+```{r}
+#compute standard deviation of each principal component
+std_dev <- prin_comp$sdev
+
+#compute variance
+pr_var <- std_dev^2
+
+#check variance of first 10 components
+ pr_var[1:10]
+```
+
+```{r}
+# Eigenvalues
+eig.val <- get_eigenvalue(prin_comp)
+eig.val
+
+```
+With the first two Principal Components it's possible to explain 89% of the variance. The first dimension alone explains 80%, so we will focus on this one.
+
+```{r}
+fviz_eig(prin_comp, addlabels = TRUE, linecolor = "red")
+```
+
+```{r}
+fviz_pca_ind(prin_comp,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+
+```{r}
+fviz_pca_var(prin_comp,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+
+Indicators for influencing the first Principal Component ranked according to influence.
+```{r}
+pc_1 <- prin_comp$x[,1]
+pc_1 <- sort(abs(pc_1), decreasing = TRUE)
+pc_1
+```
+```{r}
+fviz_cos2(prin_comp, choice = "var", axes = 1)
+```
+```{r}
+fviz_contrib(prin_comp, choice = "var", axes = 1, top = 31)
+```
+
+```{r}
+# For easier lookup of the most relevant indicators
+
+datawmedian_eachid <- data_w_median %>%
+  select(IndicatorID, IndicatorName) %>%
+  group_by(IndicatorID) %>%
+  distinct() #%>%
+  #view()
+```
+
+```{r}
+# Recalculation of Composite Health Index with only the top 5 indicators from each health outcome measures, modifiable risk factors and 
+# social determinants of health obtained with PCA
+
+top5_sg <- c(40401, 40701, 40402, 40502, 40702, # Health outcome measures
+             91872, 90630, 11201, 90356, 11202, # Social determinants of health
+             20602, 93077, 93015, 20601, 92443) # Modifiable risk factors
+
+top5_df<- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "District & UA", Sex == "Persons", IndicatorID %in% top5_sg) #%>%
+  #view()
+#view(top5_df)
+
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+
+top5_w_median <- top5_df %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ top5wide <- xtabs(Value_imputed ~ AreaName + IndicatorID, top5_w_median) %>%
+   as.data.frame.matrix()
+ #view(top15wide)
+
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which are replaced by median values.
+
+top5_notnormalind <- c()
+i <- 1
+
+for (col_name in colnames(top5wide)) {
+  
+  if (shapiro.test(as.numeric(top5wide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    top5_notnormalind[i] <- col_name                                   #function
+    log10(top5wide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+
+#view(top15_notnormalind)
+
+top5_normaldata = data.frame(apply(top5wide, 2, replace_w_median))
+#view(top15_normaldata)
+
+# Polarity reversal
+top5_normaldata$X93077 <- top5_normaldata$X93077 * -1
+
+top5scaled_sg <- data.frame(scale(top5_normaldata))  # scales the data to z-scores of each indicator per area.
+#view(top15scaled)
+
+# Calculation of Mean Z-score per Area
+top5zmean <- top5scaled_sg
+
+top5zmean$MeanZ <- rowMeans(top5zmean)
+#view(top15zmean)
+
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape.
+
+top5areameanz <- top5zmean %>%
+  select(MeanZ) %>%
+  rownames_to_column('Area') %>%
+  mutate(Score = MeanZ * -1 + 10) %>%
+  select(Area, Score) %>%
+  arrange(desc(Score)) #%>%
+  #view()
+#view(top15areameanz)
+```
+
+```{r}
+england_map <- st_read(dsn = "https://opendata.arcgis.com/datasets/25dc36af098744c6848f8228a09d87b3_0.geojson")
+ 
+area_scores <- select(top5areameanz, Area, Score)
+
+england_scores <- england_map %>% 
+   left_join(y = area_scores, by = c("lad18nm" = "Area")) %>%
+  select(Score, geometry) %>%
+  filter(is.na(Score) == FALSE)
+
+ plot(england_scores, main = "Aggregated Composite Health Index in England")
+```
+
+```{r}
+Mean <- mean(top5areameanz$Score)
+sdv <- sd(top5areameanz$Score)
+Median <- median(top5areameanz$Score)
+
+Mean
+sdv
+Median
+```
+
+
+```{r}
+# Correlation between indicators
+# Credits to Nanjo Atsunori
+
+top5_cor <- cor(top5scaled_sg)
+corrplot(top5_cor, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+```{r}
+# Recalculation of REGIONAL Composite Health Index with only the top 5 indicators from health outcome measures, modifiable risk factors and 
+# social determinants of health obtained with PCA
+
+top5_sg <- c(40401, 40701, 40402, 40502, 40702, # Health outcome measures
+             91872, 90630, 11201, 90356, 11202, # Social determinants of health
+             20602, 93077, 93015, 20601, 92443) # Modifiable risk factors
+
+top5_df<- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "Region", Sex == "Persons", IndicatorID %in% top5_sg) #%>%
+  #view()
+#view(top5_df)
+
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+
+region_median <- top5_df %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ region_wide <- xtabs(Value_imputed ~ AreaName + IndicatorID, region_median) %>%
+   as.data.frame.matrix()
+ #view(top15wide)
+
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which are replaced by median values.
+
+top5_notnormalind <- c()
+i <- 1
+
+for (col_name in colnames(region_wide)) {
+  
+  if (shapiro.test(as.numeric(region_wide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    top5_notnormalind[i] <- col_name                                   #function
+    log10(region_wide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+
+#view(top15_notnormalind)
+
+region_normaldata = data.frame(apply(region_wide, 2, replace_w_median))
+#view(top15_normaldata)
+
+# Polarity reversal
+region_normaldata$X93077 <- region_normaldata$X93077 * -1
+
+regionscaled_sg <- data.frame(scale(region_normaldata))  # scales the data to z-scores of each indicator per area.
+#view(top15scaled)
+
+# Calculation of Mean Z-score per Area
+region_mean <- regionscaled_sg
+
+region_mean$MeanZ <- rowMeans(region_mean)
+#view(top15zmean)
+
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape.
+
+region_mean <- region_mean %>%
+  rownames_to_column('Area') %>%
+  mutate(Score = MeanZ * -1 + 10) %>%
+  select(Area, Score) %>%
+  arrange(desc(Score)) #%>%
+  #view()
+
+```
+
+```{r}
+# Recalculation of Health Index with only the top 5 indicators from health outcome measures obtained with PCA
+
+topHOM <- c(40401, 40701, 40402, 40502, 40702) # Health outcome measures
+
+topHOM_df<- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "District & UA", Sex == "Persons", IndicatorID %in% topHOM) #%>%
+  #view()
+#view(top15_df)
+
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+
+topHOM_w_median <- topHOM_df %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ topHOMwide <- xtabs(Value_imputed ~ AreaName + IndicatorID, topHOM_w_median) %>%
+   as.data.frame.matrix()
+ #view(top15wide)
+
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which are replaced by median values.
+
+topHOM_notnormalind <- c()
+i <- 1
+
+for (col_name in colnames(topHOMwide)) {
+  
+  if (shapiro.test(as.numeric(topHOMwide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    topHOM_notnormalind[i] <- col_name                                   #function
+    log10(topHOMwide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+
+#view(top15_notnormalind)
+
+topHOM_normaldata = data.frame(apply(topHOMwide, 2, replace_w_median))
+#view(top15_normaldata)
+
+topHOMscaled <- data.frame(scale(topHOM_normaldata))  # scales the data to z-scores of each indicator per area.
+#view(top15scaled)
+
+# Calculation of Mean Z-score per Area
+topHOMzmean <- topHOMscaled
+
+topHOMzmean$MeanZ <- rowMeans(topHOMzmean)
+#view(top15zmean)
+
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape.
+
+topHOMareameanz <- topHOMzmean %>%
+  select(MeanZ) %>%
+  rownames_to_column('Area') %>%
+  mutate(Score = MeanZ * -1 + 10) %>%
+  select(Area, Score) %>%
+  arrange(desc(Score)) #%>%
+  #view()
+#view(top15areameanz)
+
+```
+
+```{r}
+#england_map <- st_read(dsn = #"https://opendata.arcgis.com/datasets/25dc36af098744c6848f8228a09d87b3_0.geojson")
+# 
+hom_scores <- select(topHOMareameanz, Area, Score)
+
+hom_england <- england_map %>% 
+   left_join(y = hom_scores, by = c("lad18nm" = "Area")) %>%
+  select(Score, geometry) %>%
+  filter(is.na(Score) == FALSE)
+
+ plot(hom_england, main = "Health Outcome Measures in England")
+```
+
+```{r}
+Mean <- mean(topHOMareameanz$Score)
+sdv <- sd(topHOMareameanz$Score)
+Median <- median(topHOMareameanz$Score)
+
+Mean
+sdv
+Median
+```
+
+```{r}
+# Correlation between indicators
+# Credits to Nanjo Atsunori
+
+topHOM_cor <- cor(topHOMscaled)
+corrplot(topHOM_cor, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+
+```{r}
+
+# Recalculation of Health Index with only the top 5 indicators from the Social determinants of health subgroup
+
+top3SDH <- c(91872, 90630, 11201, 90356, 11202) # Social determinants of health
+
+topSDH_df<- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "District & UA", Sex == "Persons", IndicatorID %in% top3SDH) #%>%
+  #view()
+#view(top15_df)
+
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+
+topSDH_w_median <- topSDH_df %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ topSDHwide <- xtabs(Value_imputed ~ AreaName + IndicatorID, topSDH_w_median) %>%
+   as.data.frame.matrix()
+ #view(top15wide)
+
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which are replaced by median values.
+
+topSDH_notnormalind <- c()
+i <- 1
+
+for (col_name in colnames(topSDHwide)) {
+  
+  if (shapiro.test(as.numeric(topSDHwide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    topSDH_notnormalind[i] <- col_name                                   #function
+    log10(topSDHwide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+
+#view(top15_notnormalind)
+
+topSDH_normaldata = data.frame(apply(topSDHwide, 2, replace_w_median))
+#view(top15_normaldata)
+
+topSDHscaled <- data.frame(scale(topSDH_normaldata))  # scales the data to z-scores of each indicator per area.
+#view(top15scaled)
+
+# Calculation of Mean Z-score per Area
+topSDHzmean <- topSDHscaled
+
+topSDHzmean$MeanZ <- rowMeans(topSDHzmean)
+#view(top15zmean)
+
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape.
+
+topSDHareameanz <- topSDHzmean %>%
+  select(MeanZ) %>%
+  rownames_to_column('Area') %>%
+  mutate(Score = MeanZ * -1 + 10) %>%
+  select(Area, Score) %>%
+  arrange(desc(Score)) #%>%
+  #view()
+#view(top15areameanz)
+
+```
+
+```{r}
+#england_map <- st_read(dsn = #"https://opendata.arcgis.com/datasets/25dc36af098744c6848f8228a09d87b3_0.geojson")
+# 
+sdh_scores <- select(topSDHareameanz, Area, Score)
+
+sdh_england <- england_map %>% 
+   left_join(y = sdh_scores, by = c("lad18nm" = "Area")) %>%
+  select(Score, geometry) %>%
+  filter(is.na(Score) == FALSE)
+
+ plot(sdh_england, main = "Social Determinants of Health in England")
+```
+
+```{r}
+Mean <- mean(topSDHareameanz$Score)
+sdv <- sd(topSDHareameanz$Score)
+Median <- median(topSDHareameanz$Score)
+
+Mean
+sdv
+Median
+```
+
+```{r}
+# Correlation between indicators
+# Credits to Nanjo Atsunori
+
+topSDH_cor <- cor(topSDHscaled)
+corrplot(topSDH_cor, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+
+```{r}
+
+# Recalculation of Health Index with only the top 5 indicators from Modifiable risk factors subgroup obtained with PCA
+
+topMRF <- c(20602, 93077, 93015, 20601, 92443) # Modifiable risk factors
+
+topMRF_df<- data %>% 
+  group_by(IndicatorID, IndicatorName, Sex, Age, AreaName) %>%                     
+  filter(TimeperiodSortable == max(TimeperiodSortable), AreaType == "District & UA", Sex == "Persons", IndicatorID %in% topMRF) #%>%
+  #view()
+#view(top15_df)
+
+# Imputation of missing data with the median value
+# Credits to John Lomas and Anil.
+
+topMRF_w_median <- topMRF_df %>% 
+  group_by(IndicatorID, IndicatorName) %>%
+  select(TimeperiodSortable, IndicatorID, IndicatorName, AreaCode, AreaName, Value) %>%  
+  mutate(Median = median(Value, na.rm = TRUE), Value_imputed = ifelse(is.na(Value), Median, Value)) %>%
+  select(-c(AreaCode, Median, Value)) #%>%
+  #view()
+
+# Transform the data from long to wide format
+# Credits to Nanjo Atsunori
+ topMRFwide <- xtabs(Value_imputed ~ AreaName + IndicatorID, topMRF_w_median) %>%
+   as.data.frame.matrix()
+ #view(top15wide)
+
+# test of normality of Indicator values with Shapiro-Wilk test. If data for an indicator is not normal (p-value < 0.05)
+# it normalises the data with the log 10 function. The function produces NA values for negative numbers or zeros, which are replaced by median values.
+
+topMRF_notnormalind <- c()
+i <- 1
+
+for (col_name in colnames(topMRFwide)) {
+  
+  if (shapiro.test(as.numeric(topMRFwide[[col_name]]))$p.value < 0.05) { #if data is not normal it 
+                                                                        #it normalises it with log10
+    topMRF_notnormalind[i] <- col_name                                   #function
+    log10(topMRFwide[[col_name]])
+    i <- i + 1
+    
+  }
+}
+
+#view(top15_notnormalind)
+
+topMRF_normaldata = data.frame(apply(topMRFwide, 2, replace_w_median))
+#view(top15_normaldata)
+
+topMRF_normaldata$X93077 <- topMRF_normaldata$X93077 * -1
+
+topMRFscaled <- data.frame(scale(topMRF_normaldata))  # scales the data to z-scores of each indicator per area.
+#view(top15scaled)
+
+# Calculation of Mean Z-score per Area
+topMRFzmean <- topMRFscaled
+
+topMRFzmean$MeanZ <- rowMeans(topMRFzmean)
+#view(top15zmean)
+
+# Isolation of Mean Z-score for each area. This allows the ranking of each area's healthcare landscape.
+
+topMRFareameanz <- topMRFzmean %>%
+  select(MeanZ) %>%
+  rownames_to_column('Area') %>%
+  mutate(Score = MeanZ * -1 + 10) %>%
+  select(Area, Score) %>%
+  arrange(desc(Score)) #%>%
+  #view()
+#view(top15areameanz)
+
+
+```
+
+```{r}
+#england_map <- st_read(dsn = #"https://opendata.arcgis.com/datasets/25dc36af098744c6848f8228a09d87b3_0.geojson")
+# 
+mrf_scores <- select(topMRFareameanz, Area, Score)
+
+mrf_england <- england_map %>% 
+   left_join(y = mrf_scores, by = c("lad18nm" = "Area")) %>%
+  select(Score, geometry) %>%
+  filter(is.na(Score) == FALSE)
+
+ plot(mrf_england, main = "Modifiable Risk Factors in England")
+```
+```{r}
+Mean <- mean(topMRFareameanz$Score)
+sdv <- sd(topMRFareameanz$Score)
+Median <- median(topMRFareameanz$Score)
+
+Mean
+sdv
+Median
+```
+```{r}
+# Correlation between indicators
+# Credits to Nanjo Atsunori
+
+topMRF_cor <- cor(topMRFscaled)
+corrplot(topMRF_cor, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+
+
+
